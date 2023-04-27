@@ -1,0 +1,695 @@
+---
+title: "3. Gradient Boosted Regressions"
+author: "Suman Jumani"
+date: "2022-12-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, cache =TRUE)
+```
+
+**Gradient boosted machines (GBMs)** or boosted regression trees are a popular machine learning algorithm. Unlike random forests, where an ensemble of deep independent trees are bulit, GBMs build an ensemble of shallow and weak successive trees with each tree learning and improving on the previous. When combined, these many weak successive trees produce a powerful “committee”. The main idea of boosting is is that trees are grown sequentially using information from previously grown trees. At each iteration, a new weak, base-learner tree is fit to the residuals of the previous ensemble of trees, and the process continues till the cross validation makes it stop.Combining many weak models (versus strong ones) has three main benefits: 
+* Speed - Shorter trees are computationally cheaper
+* Accuracy improvement - weak models allow the algorithm to learn slowly, making minor adjustments in areas where it does not perform well, generally improving model performance 
+* Reduced overfitting - small incremental improvements with each model in the ensemble allows it to stop the learning process as soon as overfitting has been detected (typically by using cross-validation)
+
+
+**Advantages:**
+
+* Often provides predictive accuracy that cannot be beat.
+* Lots of flexibility - several hyperparameter tuning options that make these models very flexible.
+* No data pre-processing required - although pre-processing (normalizing, centering, scaling) can sometimes improve model performance.
+* Handles missing data - imputation not required.
+
+
+**Disadvantages:**
+
+* Can be prone to overfitting - GBMs will continue improving to minimize errors, thereby overemphasizing outliers and overfitting. Cross-validations can be used to neutralize this.
+* Computationally expensive - GBMs often require many trees (>1000) which can be time and memory exhaustive.
+* Complexity in hypertuning - The high flexibility results in many parameters that interact and influence the approach (number of iterations, tree depth, regularization parameters, etc.). This requires a large grid search during tuning.
+* Less interpretable - Although this can be addressed with tools like variable importance, partial dependence plots, LIME, etc.
+
+## **Analyzing Dam Removal Cost Data using GBMs**
+
+```{r eval=FALSE}
+#Load necessary packages
+library(tidyverse)
+library(gbm)
+library(caret)
+library(hrbrthemes)
+library(kableExtra)
+library(patchwork)
+library(skimr)
+library(tune)
+library(pdp)
+
+rm(list=ls(all=TRUE)) #Clear local memory
+```
+
+
+### Data Preparation and Preprocessing
+#### a. Examining the data and its summary statistics
+
+```{r}
+##Import the data
+fin<-read.csv("FromDuda/ActualFinalData/CleanedDataFinalCopy.csv")
+
+#Add variable of dam age
+fin$Dam_age<- fin$Removal_year - fin$Built_year 
+
+#Convert stream order to numeric
+fin$StrOrder<- as.numeric(fin$StrOrder)
+
+#Re-scale SD, MD, PR, and Total scores between 0 and 1
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+fin$SD_scale <- range01(fin$SD_score)
+fin$MD_scale <- range01(fin$MD_score)
+fin$PR_scale <- range01(fin$PR_score)
+fin$Tot_scale <- range01(fin$Tot_Drivers)
+fin$Tot_scale2 <- range01(fin$Tot_Drivers2)
+
+#Note, this re-scaling does not change the distribution of the data - as seen below
+par(mfrow=c(1,2))
+hist(fin$Tot_Drivers)
+hist(fin$Tot_scale)
+colnames(fin)
+#Retaining a data frame of only predictors and the response variables
+finr<- fin[,-c(1,2,5,6,8,9,14,15,21:37)] 
+
+#Examine descriptive statistics for the variables of interest
+skimmed <- skimr::skim_to_wide(finr); skimmed
+
+```
+
+* **Region** is the only categorical variables we will use in the model.
+* **Dam length** & **Dam age** have too many missing values to impute. May need to exclude them from the model
+* Try imputing missing dam height values, particularly based on height category (HtCategory)
+
+
+#### b. Imputing missing height data 
+We can use the median height of dams <5m  to replace the missing height values of the corresponding height category
+```{r eval=FALSE}
+#Checking ht category of dams with missing ht data
+finr$HtCategory[is.na(finr$dam_height_m)] 
+
+#Isolating missing height data for dams <5m high
+missingHt<-finr[(is.na(finr$dam_height_m)) & finr$HtCategory=="less than 5",] #35 missing observations
+
+#What are mean and median height value for dams <5m high
+mean(finr$dam_height_m[finr$HtCategory=="less than 5"], na.rm = TRUE)
+median(finr$dam_height_m[finr$HtCategory=="less than 5"], na.rm = TRUE)
+
+#Replacing missing ht data with the median dam ht for dams <5m 
+missingHt$dam_height_m<- median(finr$dam_height_m[finr$HtCategory=="less than 5"], na.rm = TRUE)
+finr$dam_height_imp<- missingHt$dam_height_m[match(finr$feature_id, missingHt$feature_id)]
+finr$dam_height_m<- coalesce(finr$dam_height_m, finr$dam_height_imp)
+
+```
+
+#### c. Examining the distribution of dam heights. 
+
+```{r}
+par(mfrow=c(2,2))
+hist(finr$dam_height_m, main="Height disribution \n of all dams (n=667")
+hist(finr$dam_height_m[finr$dam_height_m<=15], main="Dams <=15m in \n height (n=652")
+hist(finr$dam_height_m[finr$dam_height_m<=10], main="Dams <=10m in \n height (n=637")
+hist(finr$dam_height_m[finr$dam_height_m<=5], main="Dams <=5m in \n height (n=561")
+
+```
+
+## **Working with the full data**
+
+### Step 1 - Partition & process the data 
+Split data to create training (80%) and test (20%) data using caret’s 'createDataPartition' function
+
+```{r}
+set.seed(100) 
+
+#Get row numbers for the training data
+trainRowNumbers <- caret::createDataPartition(finr$CostEst_StAdj, p=0.8, list=FALSE)
+
+#Create the training data - Subset fin to include the elements in trainRowNumbers
+train <- finr[trainRowNumbers,] #n=536
+
+#Create the test data - Subset fin to exclude the elements in trainRowNumbers
+test <- finr[-trainRowNumbers,]
+
+#Adding the following dams to the test dataset
+#Hemlock, Sabin Dam, Boardman Dam, Gordon Dam, Grihm dam, Savage Rapids, Mill Pond (Mill river Stamford), Smelt Hill
+#Subsetting the above dams 
+select<- train[train$dam_name %in% c("Boardman Dam", "Mill Pond Dam", "Smelt Hill Dam", "Savage Rapids Dam", "Milltown Dam"),]
+
+#Remove an equivalent number from test and add to train
+set.seed(111)
+temp<- sample_n(test, nrow(select))
+train<- train[! train$dam_name %in% select$dam_name,]
+train<- rbind(train, temp)
+
+#Remove temp from test and ddd select to test 
+test<- test[!test$dam_name %in% temp$dam_name, ]
+test<- rbind(test, select)
+
+test2 <- test; test2$Cat <- "test"
+train2<-train; train2$Cat<- "train"
+df<- rbind(train2, test2)
+ggplot(df,aes(x = log1p(dam_height_m), y = CostEst_StAdj, color = Cat)) + geom_point() +
+  scale_color_discrete(name="") + theme(legend.position="top")
+
+```
+
+
+Converting the categorical variable of 'Region' to dummy variables (one-hot encoding) - Categorical columns need to be converted to numeric in order for it to be used by the machine learning algorithms. Just replacing the categories with a number may not be meaningful especially if there is no intrinsic ordering among the categories. So we convert the categorical variable with as many binary (1 or 0) variables as there are categories
+
+```{r}
+library(caret)
+
+#Creating dummy variables is converting a categorical variable to as many binary variables as there are categories
+#Note we exclude Dam material and purpose since they are to be excluded from the model
+dummies_model <- caret::dummyVars(CostEst_StAdj ~ dam_height_m+ region+ StrOrder+ AvgAnnualQ.CS+
+                                   TotDA.SqKm+ SD_scale + MD_scale + PR_scale + Tot_scale+
+                                   Tot_scale2+ Dam_age+dam_length_m + DamMaterialCat, data=train)
+
+#Create the dummy variables using predict. The Y variable (CostEst_StAdj) will not be present in trainData_mat.
+trainData_mat <- predict(dummies_model, newdata = train)
+
+#Convert to dataframe
+trainr <- data.frame(trainData_mat)
+
+# Append the Y variable
+trainr$CostEst_StAdj<- train$CostEst_StAdj
+
+#See the structure of the new dataset
+str(trainr) 
+
+```
+
+
+### Step 2 - Visualize the importance of variables
+
+```{r warning=FALSE, fig.width=9,fig.height=11}
+featurePlot(x = trainr[, c(1:17)], 
+            y = log1p(trainr$CostEst_StAdj), 
+            plot = "scatter", 
+            type = c("p", "smooth"), 
+            span = 1, layout = c(4, 5))
+
+```
+
+**Summary:** All variables, except for dam age show a trend with respect to the response. Since this variable has high levels of missing data, we will exclude it from the final model. 
+
+### Step 3 - Training and Tuning the model
+
+```{r}
+#What are the hyperparamertes of interest for GBM method in caret?
+modelLookup('gbm') 
+
+#Are there any variables with near-zero variance? If so, they may need to be dropped
+set.seed(100)
+nzv <- nearZeroVar(trainr, saveMetrics= TRUE) 
+table(nzv$nzv)  #No variables with zero variance
+  
+
+#Initial parameterization and tuning (key inputs: iterations, tree size, shrinkage) 
+#Using a k-fold cross-validation that resamples and splits our data many times to avoid overfitting
+fitControl <- trainControl(method = "repeatedcv", #repeated K-fold cross-validation 
+                           number = 20, #10-fold cross-validations (each fold will have ~66 data points)
+                           repeats = 10, #Ten separate 10-fold cross-validations used
+                           allowParallel = TRUE)
+```
+
+After preliminary checks, we build a model based on the following - 
+* We exclude dam age and dam length to reduce the need for missing data imputation & increase sample size for model prediction. 
+* We also drop stream order since its effects should be captured in drainage area and discharge. This also improves model performance slightly. 
+* We drop individual scores and retain total scores as it mildly improved model r2 and increased its predictive power based on MAE only (not RMSE). 
+* we use the version of Total scores **without** interpretive facilities since it improves the model and makes sense. 
+
+Let's incorporate these changes and **tune our hyper parameters**.
+To tune a boosted tree model, we can give the model different values of the tuning parameters. Caret will re-train the model using different tuning parameters and select the best version. There are three main tuning parameters to consider:
+
+* Number of iterations or trees, called **n.trees** (should be very high)
+* Complexity of the tree, called **interaction.depth** (should be low-medium)
+* Learning rate: how quickly the algorithm adapts, called **shrinkage** (should be low)
+* Minimum number of observations in a node to commence splitting, called **n.minobsinnode** (10-20)
+
+```{r}
+tuneGrid <- expand.grid(
+ n.trees = seq(2800, 3800, 100),
+ interaction.depth = c(3, 4,5),
+ shrinkage = c(0.001, 0.002, 0.003, 0.004),
+ n.minobsinnode = 10
+)
+
+#library("doParallel") #Run on parallel cores to improve speed
+#detectCores() #we have 20 cores
+#cl<-makePSOCKcluster(6) #run on 6
+#registerDoParallel(cl)
+  
+#set.seed(111)
+#gbm6a <- train(log1p(CostEst_StAdj) ~dam_height_m+ AvgAnnualQ.CS+
+#                TotDA.SqKm+ Tot_scale2+ DamMaterialCat +
+#                regionSouthwest + regionSoutheast+ regionMidwest+ 
+#                regionNortheast+ regionNorthwest,             
+#              data=trainr,  
+#              method = "gbm",                        #ML method
+#              metric = "RMSE",                      #Choose a fit metric 
+#              maximize =FALSE,
+#              #preProcess = c("center", "scale"),
+#              trControl = fitControl,               #CV settings
+#              tuneGrid = tuneGrid,                  #Tuning parameters
+#              verbose = FALSE,   
+#              bag.fraction=0.7,                   #prevents over-fitting
+#              na.action=na.exclude)  
+
+#stopCluster(cl) #end parallel processing 
+
+#gbm6a$finalModel
+#write_rds(gbm6a, "ModelOutputs/LogCost_Global_gbm6a.RDS") #export the model
+gbm6a<- readRDS("ModelOutputs/LogCost_Global_gbm6a.RDS")
+
+# Display the results of the analysis
+gbm6a
+plot(gbm6a)
+plot(varImp(object=gbm6a),main="GBM 6 - Variable Importance")
+```
+
+* I calibrated and adjusted the tuning parameters to get the best fit 
+* The above computes (16x3x5) 240 combinations 
+* The final values used for the model were n.trees = 2800, interaction.depth = 4, shrinkage = 0.002, n.minobsinnode = 10
+* The model **R2 = 57.4%, RMSE = 1.29, MAE = 1.023** 
+* Dam height, discharge, total drivers, and drainage area are the most important drivers of cost. 
+
+Now that the primary drivers of removal costs have been identified, let's examine their **partial dependence plots (PDPs)**. PDPs plot the change in the average predicted value of the response as specified predictor feature(s) vary over their marginal distribution. For example, a PDP of cost and dam height will display the average change in predicted removal cost as we vary dam height while holding all other variables constant. This is done by holding all variables constant for each observation in our training data set but then apply the unique values of dam height for each observation. We then average the predicted cost across all the observations. Consequently, PDPs are low-dimensional graphical renderings of the prediction function so that the relationship between the outcome and predictors of interest can be more easily understood. These plots are especially useful in SGB and other black-box models since the output is not easily visualized (unlike a decision tree). 
+
+
+```{r}
+library(pdp)
+library(gridExtra)
+
+grid.arrange(
+  partial(gbm6a, pred.var = "dam_height_m", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "AvgAnnualQ.CS", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "Tot_scale2", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "TotDA.SqKm", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "regionSouthwest", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "DamMaterialCat", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "regionNorthwest", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "regionMidwest", plot = TRUE, rug = TRUE),
+  partial(gbm6a, pred.var = "regionNortheast", plot = TRUE, rug = TRUE),
+  ncol = 3
+)
+
+invisible(dev.off())
+```
+![**Variable PDP plots**](ModelOutputs/PDPs.png)
+
+
+```{r}
+#Let's examine the combined effect of 2 variables on cost
+hd <- partial(gbm6a, pred.var = c("dam_height_m", "AvgAnnualQ.CS"), chull = TRUE)
+plotPartial(hd, contour = TRUE)
+
+#And three variables on cost
+p1 <- plotPartial(hd, levelplot = FALSE, zlab = "Tot_scale", drape = TRUE, colorkey = TRUE, screen = list(z = -20, x = -60))
+p1
+
+p2 <- plotPartial(hd, levelplot = FALSE, zlab = "TotDA.SqKm", drape = TRUE, colorkey = TRUE, screen = list(z = -20, x= -60))
+p2
+```
+
+Since PDPs are essentially just averaged predictions, strong heterogeneity can conceal the complexity of the relationship between the response and predictors of interest. Hence, individual conditional expectation (ICE) curves can be used. ICE curves are an extension of PDPs but, rather than plot the average marginal effect on the response variable, we plot the change in the predicted response for each observation as we vary each predictor variable. Below shows the regular ICE curve plot (left) and the centered ICE curves (right). When the curves have a wide range of intercepts and are consequently “stacked” on each other, heterogeneity in the response variable values due to marginal changes in the predictor variable of interest can be difficult to discern. The centered ICE can help draw these inferences out and can highlight any strong heterogeneity in our results. 
+
+```{r}
+library(pdp)
+library(dplyr)
+pred.ice <- function(object, newdata) predict(object, newdata)
+
+ht.ice <- partial(gbm6a, pred.var = "dam_height_m", pred.fun = pred.ice)
+ht.ice <- ht.ice %>%
+group_by(yhat.id) %>% # perform next operation within each yhat.id
+mutate(yhat.centered = yhat - first(yhat)) # so each curve starts at yhat = 0
+
+# ICE curves with their average
+p1 <- ggplot(ht.ice, aes(dam_height_m, yhat)) +
+geom_line(aes(group = yhat.id), alpha = 0.2) +
+stat_summary(fun.y = mean, geom = "line", col = "red", size = 1)
+# c-ICE curves with their average
+p2 <- ggplot(ht.ice, aes(dam_height_m, yhat.centered)) +
+geom_line(aes(group = yhat.id), alpha = 0.2) +
+stat_summary(fun.y = mean, geom = "line", col = "red", size = 1)
+
+library(patchwork)
+p1 +p2
+#Most observations follow a common trend as dam ht increases; no observations deviate from the common trend
+
+Q.ice <- partial(gbm6a, pred.var = "AvgAnnualQ.CS", pred.fun = pred.ice)
+Q.ice <- Q.ice %>%
+group_by(yhat.id) %>% # perform next operation within each yhat.id
+mutate(yhat.centered = yhat - first(yhat)) # so each curve starts at yhat = 0
+
+# ICE curves with their average
+q1 <- ggplot(Q.ice, aes(AvgAnnualQ.CS, yhat)) +
+geom_line(aes(group = yhat.id), alpha = 0.2) +
+stat_summary(fun.y = mean, geom = "line", col = "red", size = 1)
+# c-ICE curves with their average
+q2 <- ggplot(Q.ice, aes(AvgAnnualQ.CS, yhat.centered)) +
+geom_line(aes(group = yhat.id), alpha = 0.2) +
+stat_summary(fun.y = mean, geom = "line", col = "red", size = 1)
+
+library(patchwork)
+q1 +q2 
+```
+### Step 4 - Predict on test data
+
+Now, let's examine model performance on the test data using the predict function. We need to first separate the test predictor variables and test response (or cost). RMSE, RAE, and R2 will be the metrics to evaluate model fit. In order to use the model to predict on new data, the data has to be pre-processed and transformed the way we did on the training data. 
+
+```{r}
+#Create dummy variables
+test2 <- predict(dummies_model, test)
+
+#Exponentiating the results to revert the log transformation
+gbm6_pred = exp(predict(gbm6a, test2))-1
+
+#Assigning test data row names to the predictions
+names(gbm6_pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+
+#Examine sample size of the prediction models
+length(gbm6_pred)
+
+## Evaluate model accuracy 
+residuals<-test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])]- gbm6_pred
+
+#RMSE
+RMSE.gbm6<- sqrt(mean(residuals^2)); RMSE.gbm6 #4.34M 
+
+#MAE
+MAE.gbm6<- mean(abs(residuals)); MAE.gbm6 #1.39M 
+
+#R2
+meanCost<-mean(test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])])
+tss<- sum((test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])]-meanCost)^2)#total sum of squares
+rss<- sum(residuals^2)
+rsq<- 1-(rss/tss); rsq #0.517 
+
+```
+
+The final 'best' mean model predictions on the test data have an **RMSE of 4.34 million USD**, **MAE of 1.4 million USD**, and an **R2 of 51.8%**. 
+
+#### Generating Prediction Intervals for GBMs
+In order to estimate some uncertainty around predicted costs, lets use GBMs with a quantile distribution to estimate cost at different quantiles. Let's compute cost estimates for 97.5, 75, 50, 25, 2.5 quantiles
+
+```{r}
+tuneGrid2 <- expand.grid(
+ n.trees = 5000, #increasing no of trees to improve robustness
+ interaction.depth = 4, #since that's the best option based on above constructed GBMs
+ shrinkage = 0.002, #a low learning rate for robustness
+ n.minobsinnode = 10
+)
+
+#library("doParallel") #Run on parallel cores to improve speed
+#detectCores() #we have 20 cores
+#cl<-makePSOCKcluster(6) #run on 6
+#registerDoParallel(cl)
+#library(gbm)
+
+# set.seed(111)
+# gbm6_0.5 <- train(log1p(CostEst_StAdj) ~ dam_height_m+ AvgAnnualQ.CS+
+#                     TotDA.SqKm+ Tot_scale2+ DamMaterialCat +
+#                     regionSouthwest + regionSoutheast +
+#                     regionMidwest+ regionNortheast+ regionNorthwest,
+#                  data=trainr,              #Run on the training data
+                   # distribution = list(name="quantile",alpha=0.5),
+                   # method = "gbm",
+                   # metric = "RMSE",          
+                   # maximize =FALSE,        
+                   # trControl = fitControl,  
+                   # tuneGrid = tuneGrid2,       
+                   # verbose = FALSE,         
+                   # bag.fraction=0.7,
+                   # na.action=na.exclude)   
+
+# set.seed(111)
+# gbm6_0.75 <- train(log1p(CostEst_StAdj) ~ dam_height_m+ AvgAnnualQ.CS+
+#                      TotDA.SqKm+ Tot_scale2+
+#                      DamMaterialCat + regionSouthwest + regionSoutheast +
+#                      regionMidwest+ regionNortheast+ regionNorthwest,           
+#                    data=trainr,              #Run on the training data
+#                    distribution = list(name="quantile",alpha=0.75),
+#                    method = "gbm",
+#                    metric = "RMSE",          
+#                    maximize =FALSE,       
+#                    trControl = fitControl,  
+#                    tuneGrid = tuneGrid2,       
+#                    verbose = FALSE,         
+#                    bag.fraction=0.7,
+#                    na.action=na.exclude)   
+# 
+# set.seed(111)
+# gbm6_0.25 <- train(log1p(CostEst_StAdj) ~ dam_height_m+ AvgAnnualQ.CS+
+#                     TotDA.SqKm+ Tot_scale2+
+#                      DamMaterialCat + regionSouthwest + regionSoutheast +
+#                      regionMidwest+ regionNortheast+ regionNorthwest,           
+#                    data=trainr,              #Run on the training data
+#                    distribution = list(name="quantile",alpha=0.25),
+#                    method = "gbm",
+#                    metric = "RMSE",       
+#                    maximize =FALSE,        
+#                    trControl = fitControl, 
+#                    tuneGrid = tuneGrid2,       
+#                    verbose = FALSE,         
+#                    bag.fraction=0.7,
+#                    na.action=na.exclude)   
+# 
+# 
+# set.seed(111)
+# gbm6_0.975 <- train(log1p(CostEst_StAdj) ~ dam_height_m+ AvgAnnualQ.CS+
+#                      TotDA.SqKm+ Tot_scale2+
+#                      DamMaterialCat + regionSouthwest + regionSoutheast +
+#                      regionMidwest+ regionNortheast+ regionNorthwest,           
+#                    data=trainr,              #Run on the training data
+#                    distribution = list(name="quantile",alpha=0.975),
+#                    method = "gbm",
+#                    metric = "RMSE",         
+#                    maximize =FALSE,        
+#                    trControl = fitControl,  
+#                    tuneGrid = tuneGrid2,       
+#                    verbose = FALSE,      
+#                    bag.fraction=0.7,
+#                    na.action=na.exclude)   
+# 
+# 
+# set.seed(111)
+# gbm6_0.025 <- train(log1p(CostEst_StAdj) ~ dam_height_m+ AvgAnnualQ.CS+
+#                      TotDA.SqKm+ Tot_scale2+
+#                      DamMaterialCat + regionSouthwest + regionSoutheast +
+#                      regionMidwest+ regionNortheast+ regionNorthwest,           
+#                    data=trainr,              #Run on the training data
+#                    distribution = list(name="quantile",alpha=0.025),
+#                    method = "gbm",
+#                    metric = "RMSE",         
+#                    maximize =FALSE,        
+#                    trControl = fitControl,  
+#                    tuneGrid = tuneGrid2,       
+#                    verbose = FALSE,       
+#                    bag.fraction=0.7,
+#                    na.action=na.exclude)   
+# 
+# 
+# stopCluster(cl) #end parallel processing
+#write_rds(gbm6_0.5, "ModelOutputs/LogCost_Global_gbm6_0.5.RDS") #export the model
+#write_rds(gbm6_0.25, "ModelOutputs/LogCost_Global_gbm6_0.25.RDS") #export the model
+#write_rds(gbm6_0.75, "ModelOutputs/LogCost_Global_gbm6_0.75.RDS") #export the model
+#write_rds(gbm6_0.975, "ModelOutputs/LogCost_Global_gbm6_0.975.RDS") #export the model
+#write_rds(gbm6_0.025, "ModelOutputs/LogCost_Global_gbm6_0.025.RDS") #export the model
+
+gbm6_0.5<- readRDS("ModelOutputs/LogCost_Global_gbm6_0.5.RDS")
+gbm6_0.25<- readRDS("ModelOutputs/LogCost_Global_gbm6_0.25.RDS") 
+gbm6_0.75<- readRDS("ModelOutputs/LogCost_Global_gbm6_0.75.RDS") 
+gbm6_0.975<- readRDS("ModelOutputs/LogCost_Global_gbm6_0.975.RDS")
+gbm6_0.025<-readRDS("ModelOutputs/LogCost_Global_gbm6_0.025.RDS") 
+
+# Predictions
+test2 <- predict(dummies_model, test)
+
+#Exponentiating the results to revert the log transformation
+gbm6_0.50pred = exp(predict(gbm6_0.5, test2))-1
+gbm6_0.75pred = exp(predict(gbm6_0.75, test2))-1
+gbm6_0.25pred = exp(predict(gbm6_0.25, test2))-1
+gbm6_0.975pred = exp(predict(gbm6_0.975, test2))-1
+gbm6_0.025pred = exp(predict(gbm6_0.025, test2))-1
+
+#Assigning test data row names to the predictions
+names(gbm6_0.50pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+names(gbm6_0.75pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+names(gbm6_0.25pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+names(gbm6_0.975pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+names(gbm6_0.025pred)<- test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])]
+
+#Compiling the predicted outputs
+comp <- data.frame(DamName= test$dam_name[complete.cases(test[,c(3,5:6,10:11,18)])],
+                   Actual = test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])], 
+                   PredictedMean = gbm6_pred,
+                   PredictedMedian=gbm6_0.50pred,
+                   Predicted_0.75 = gbm6_0.75pred,
+                   Predicted_0.25 = gbm6_0.25pred,
+                   Predicted_0.975 = gbm6_0.975pred,
+                   Predicted_0.025 = gbm6_0.025pred)
+
+comp$DamHt<- test$dam_height_m[match(comp$DamName, test$dam_name)]
+
+#write.csv(comp, "FromDuda/ActualFinalData/compiled_gbm6_std_params.csv", row.names = FALSE)
+#comp<- read.csv("FromDuda/ActualFinalData/compiled_gbm6_std_params.csv")
+
+
+## Evaluate model accuracy 
+residuals<-test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])]- gbm6_0.50pred
+
+#RMSE
+RMSE.gbm6_0.5<- sqrt(mean(residuals^2)); RMSE.gbm6_0.5 #5.09
+
+#MAE
+MAE.gbm6_0.5<- mean(abs(residuals)); MAE.gbm6_0.5 #1.45M 
+
+#R2
+meanCost<-mean(test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])])
+tss<- sum((test$CostEst_StAdj[complete.cases(test[,c(3,5:6,10:11,18)])]-meanCost)^2)#total sum of squares
+rss<- sum(residuals^2)
+rsq_0.5<- 1-(rss/tss); rsq_0.5 #0.338
+
+```
+
+The final 'best' median model predictions on the test data have an **RMSE of 5.09 million USD**, **MAE of 1.45 million USD**, and an **R2 of 33.8%**. 
+
+#### Visualizing the output
+
+```{r echo=FALSE}
+a<-ggplot(comp, aes(x=DamHt))+
+   geom_ribbon(aes(ymin=Predicted_0.25, ymax=Predicted_0.75, x=DamHt), fill = "dark grey", alpha = 0.5)+
+   geom_ribbon(aes(ymin=Predicted_0.025, ymax=Predicted_0.975, x=DamHt), fill = "light grey", alpha = 0.5)+
+   geom_line(aes(y=Actual), color = "black", lwd=1, alpha=0.7)+
+   geom_line(aes(y=PredictedMean), color = "firebrick", lwd = 1, alpha=0.7)+
+   geom_line(aes(y=PredictedMedian), color = "dark orange", lwd = 1, alpha=0.7)+
+  xlab("Dam height (m)")+ ylab("Cost (2020 USD)")+
+  geom_rug() +theme_minimal()
+a
+#ggsave(file="ModelOutputs/ModOutput.svg", plot=a, width=10, height=6)
+#ggsave("ModelOutputs/ModOutput.png", a, width=10, height=6, dpi=500)
+
+comp_sub<- comp[comp$DamName %in% c("Boardman Dam", "Mill Pond Dam", "Sabin Dam ",
+                                    "Smelt Hill Dam", "Savage Rapids Dam"),]
+
+library(ggrepel)
+e<-ggplot(comp, aes(x=Actual, y=PredictedMedian, 
+                 color = ifelse( Actual > PredictedMedian, "Under", "Over"))) +
+  geom_errorbar(aes(ymin=Predicted_0.25, ymax=Predicted_0.75), lwd=1.1,
+                color="darkgrey",position=position_dodge(0.05))+
+  geom_errorbar(aes(ymin=Predicted_0.025, ymax=Predicted_0.975), width=.5,
+                 color="dark grey",position=position_dodge(0.05))+
+  scale_color_manual(name="QC", values = c("coral3","aquamarine4"))+
+  geom_text_repel(data=comp_sub, aes(x = Actual, label=DamName), size = 4,color = "black")+
+  geom_abline(intercept = 0, slope = 1, linetype = 2) +
+  geom_point(alpha=0.7)+xlab("Actual Cost")+ ylab("Predicted Cost")+
+  theme_minimal()
+
+
+f<-ggplot(comp, aes(x=log1p(Actual), y=log1p(PredictedMedian), 
+                 color = ifelse( Actual > PredictedMedian, "Under", "Over"))) + 
+  geom_errorbar(aes(ymin=log1p(Predicted_0.25), ymax=log1p(Predicted_0.75)), lwd=1.1,
+                color="darkgrey",position=position_dodge(0.05))+
+  geom_errorbar(aes(ymin=log1p(Predicted_0.025), ymax=log1p(Predicted_0.975)), lwd=.5,
+                color="darkgrey",position=position_dodge(0.05))+
+  scale_color_manual(name="", values = c("coral3","aquamarine4"))+
+  geom_text_repel(data=comp_sub, aes(x = log1p(Actual), label=DamName), size = 4, color = "black", nudge_x = .5, nudge_y = 1)+
+  geom_abline(intercept = 0, slope = 1, linetype = 2) +
+  geom_point(size=2, alpha=0.7)+xlab("Log Actual Cost")+ ylab("Log Predicted Median Cost")+
+  tune::coord_obs_pred()+ theme_minimal()
+
+library(patchwork)
+e + f
+
+g<- ggplot(comp, aes(x=Actual, y=PredictedMean, 
+                 color = ifelse( Actual > PredictedMean, "Under", "Over"))) + 
+  geom_errorbar(aes(ymin=Predicted_0.25, ymax=Predicted_0.75), lwd=1.1,
+                color="dark grey",position=position_dodge(0.05))+
+  geom_errorbar(aes(ymin=Predicted_0.025, ymax=Predicted_0.975), width=.5,
+                 color="dark grey",position=position_dodge(0.05))+
+  scale_color_manual(name="", values = c("coral3","aquamarine4"))+
+  geom_text_repel(data=comp_sub, aes(x = Actual, label=DamName), size = 4, color = "black")+
+  geom_abline(intercept = 0, slope = 1, linetype = 2) +
+  geom_point(alpha=0.7)+xlab("Actual Cost")+ ylab("Predicted Cost")+
+  theme_minimal()
+
+h<- ggplot(comp, aes(x=log1p(Actual), y=log1p(PredictedMean), 
+                 color = ifelse(log1p(Actual) > log1p(PredictedMean), "Under", "Over"))) + 
+  geom_errorbar(aes(ymin=log1p(Predicted_0.25), ymax=log1p(Predicted_0.75)), lwd=1.3,
+                color="darkgrey",position=position_dodge(0.05))+
+  geom_errorbar(aes(ymin=log1p(Predicted_0.025), ymax=log1p(Predicted_0.975)), lwd=.7,
+                 color="dark grey",position=position_dodge(0.05))+
+  scale_color_manual(name="", values = c("coral3","aquamarine4"))+
+  geom_text_repel(data=comp_sub, aes(x = log1p(Actual), label=DamName), size = 4, color = "black",  nudge_x = .5, nudge_y = 1)+
+  geom_abline(intercept = 0, slope = 1, linetype = 2) +
+  geom_point(size=2, alpha=0.7)+xlab("Log Actual Cost")+ ylab("Log Predicted Mean Cost")+
+  tune::coord_obs_pred()+ theme_minimal()
+
+g+h
+```
+
+The predicted median seems to be better than the predicted mean. The main outliers are indicated on the plots. 
+
+Visualizing the same output differently. The data points are organized in **descending order of dam height**.
+
+```{r eval=FALSE, echo=FALSE, cache=TRUE}
+library(tidyr)
+library(forcats)
+library(ggalt)
+
+complong <- comp %>% pivot_longer(cols=c('Actual', 'PredictedMean', 'PredictedMedian',
+                                         'Predicted_0.75', 'Predicted_0.25', 
+                                         'Predicted_0.975', 'Predicted_0.025'),
+                    names_to='Quantile',
+                    values_to='Cost')
+
+complong2<-complong[complong$Quantile %in% c("PredictedMedian", "Actual"),]
+complong2 <- complong2[order(-complong2$DamHt),] 
+complong2$DamNumber <- rep(c(1:98), each=2)
+complong3<- complong2[complong2$DamNumber<21,]
+complong4<- complong2[complong2$DamNumber>20,]
+
+c<- complong2[complong2$DamHt>5,] %>%
+  #mutate(damname = fct_reorder(DamName, DamHt)) %>%
+  ggplot(aes(x= Cost, y= DamNumber)) +
+  geom_line(aes(group = DamNumber), color="grey")+
+  geom_point(aes(color=Quantile), size=1.5) +
+  labs(x = "Cost (2020 USD Millions)", y = NULL)+
+  scale_color_ipsum(name = "")+
+  theme_ipsum_rc(grid = "X")+
+  theme(legend.position="top")
+
+#ggsave("ModelOutputs/GBM6_Lollipop_AllDams.png", c, height = 15, width = 8, dpi = 500, bg="white")
+
+invisible(dev.off())
+```
+![**Actual & Predicted cost of removals in descending order of dam height**](ModelOutputs/GBM6_Lollipop_AllDams.png)
+ 
+
+```{r eval=FALSE, echo=FALSE}
+library(tidyr)
+library(forcats)
+library(hrbrthemes)
+complong3<- complong2[!(complong2$DamName == "Savage Rapids Dam"),]
+f<- complong3 %>%
+  mutate(damname = fct_reorder(DamName, DamHt)) %>%
+  ggplot(aes(x= Cost, y= damname)) +
+  geom_line(aes(group = damname), color="grey")+
+  geom_point(aes(color=Quantile), size=1.5) +
+  labs(x = "Cost (2020 USD Millions)", y = NULL)+
+  scale_color_ipsum(name = "")+
+  theme_ipsum_rc(grid = "X")+
+  theme(legend.position="top")
+
+#ggsave("ModelOutputs/GBM6_Lollipop_AllDams_MinusOutliers.png", f, height = 15, width = 8, dpi = 500, bg="white")
+invisible(dev.off())
+```
+![**Actual & Predicted cost of removals in descending order of dam height**](ModelOutputs/GBM6_Lollipop_AllDams_MinusOutliers.png)
+
+After removing the outliers, the difference between the actual and predicted costs look more reasonable.

@@ -1,0 +1,52 @@
+State,Factor_2022,Factor_2020,StateCode
+Alabama,0.9,0.91,AL
+Alaska,1.13,1.17,AK
+Arizona,0.97,0.95,AZ
+Arkansas,0.87,0.87,AR
+California,1.24,1.23,CA
+Colorado,0.95,0.94,CO
+Connecticut,1.14,1.15,CT
+Delaware,1.11,1.1,DE
+Florida,0.9,0.91,FL
+Georgia,0.91,0.92,GA
+Hawaii,1.19,1.2,HI
+Idaho,1,0.99,ID
+Illinois,1.14,1.14,IL
+Indiana,0.98,0.98,IN
+Iowa,0.98,0.98,IA
+Kansas,0.96,0.96,KS
+Kentucky,0.94,0.95,KY
+Louisiana,0.88,0.9,LA
+Maine,1,1.01,ME
+Maryland,0.99,0.99,MD
+Massachusetts,1.14,1.15,MA
+Michigan,1.01,1,MI
+Minnesota,1.11,1.1,MN
+Mississippi,0.88,0.89,MS
+Missouri,1.01,1,MO
+Montana,0.96,0.97,MT
+Nebraska,0.96,0.96,NE
+Nevada,1.07,1.05,NV
+New Hampshire,1.03,1.04,NH
+New Jersey,1.22,1.23,NJ
+New Mexico,0.91,0.92,NM
+New York,1.16,1.18,NY
+North Carolina,0.89,0.91,NC
+North Dakota,0.96,0.97,ND
+Ohio,0.99,0.99,OH
+Oklahoma,0.88,0.88,OK
+Oregon,1.08,1.08,OR
+Pennsylvania,1.07,1.08,PA
+Rhode Island,1.13,1.14,RI
+South Carolina,0.89,0.91,SC
+South Dakota,0.95,0.94,SD
+Tennessee,0.9,0.89,TN
+Texas,0.88,0.88,TX
+Utah,0.98,0.97,UT
+Vermont,1,1.01,VT
+Virginia,0.94,0.95,VA
+Washington,1.09,1.07,WA
+West Virginia,1.01,1.01,WV
+Wisconsin,1.07,1.05,WI
+Wyoming,0.95,0.94,WY
+Washington D.C.,1.02,1.01,

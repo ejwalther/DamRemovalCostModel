@@ -2,7 +2,7 @@
 #        Dam Removal Cost Estimator Shiny App
 #   
 #           Author: Eric J Walther
-#           Last date modified: July 26, 2023
+#           Last date modified: May 11, 2026
 #==========================================================
 
 #load required packages
@@ -60,6 +60,7 @@ ui<-navbarPage(title="Dam Removal Cost Estimator",theme = shinytheme("lumen"),
                         tags$style("#text6 {font-size:18px;}"),
                         tags$style("#introtext {font-size:17px;}"),
                         tags$style("#intro2 {font-size:17px;}"),
+                        tags$style("#edit1 {font-size:16px; font-style: italic}"),
                         tags$style("#text8 {color: red;font-size:18px; font-style: bold;}"),
                         sidebarLayout(
                           sidebarPanel(
@@ -124,6 +125,7 @@ ui<-navbarPage(title="Dam Removal Cost Estimator",theme = shinytheme("lumen"),
                                         ),
                                         tabPanel("Cost prediction",
                                                  h3("Estimated Costs (in 2020 USD)"),
+                                                 htmlOutput("edit1"),
                                                  br(),
                                                  htmlOutput("text8"),
                                                  tableOutput("tablePreds"),
@@ -336,7 +338,8 @@ ui<-navbarPage(title="Dam Removal Cost Estimator",theme = shinytheme("lumen"),
                         h3("Interactive tools:"),
                         htmlOutput("interactivetools",style = "text-align:justify"),
                         h3("Associated publications"),
-                        htmlOutput("associatedpubs",style = "text-align:justify")
+                        htmlOutput("associatedpubs",style = "text-align:justify"),
+                        br()
                ),
                tabPanel(title = "Contributors",fluid = TRUE,
                         h3("Contributor statement"),
@@ -414,8 +417,11 @@ server <- function(input, output) {
                "•	Geographic region: Due to variations in permitting procedures, experiences with prior removals, and cost of removals, dam cost vary by geographic region within the US."
                , sep="<br/>"
     ))})
+  output$edit1<-renderText({
+    "Important Note: Cost estimates are modeled outputs based on Duda et al. (2024), and are not intended to replace detailed engineering assessments. All values are in 2020 USD and should be appropriately adjusted for current inflation. Estimates may be less reliable for structures exceeding 5 m in height due to limited data. Costs related to stakeholder consultations or litigation, if any, are not included in this model."
+  })
   output$text8<-renderText({
-    warning<-"WARNING: Input values are outside the range of the model training dataset. Interpet results with caution."
+    warning<-"WARNING: Input values are outside the range of the model training dataset. Interpret results with caution."
     blankmes<-""
     ifelse(input$num>64|input$discharge>445.3|input$DA>64103,paste0(warning),paste0(blankmes))
     })
@@ -799,16 +805,22 @@ server <- function(input, output) {
   output$databaseresource<-renderUI({HTML(paste0("•	",a("USGS cost estimates for dam removal projects in the US",
                                                         href="https://doi.org/10.5066/P9G8V371",
                                                         target="_blank"),br(),
-                                                 "•	Oregon State Univesity detailed cost database [link formcoming]",br(),
+                                                 "•	",a("Oregon State Univesity detailed cost database",
+                                                        href="https://ir.library.oregonstate.edu/concern/datasets/h415pj58r?locale=de",
+                                                        target="_blank"),br(),
   "•	",a("American Rivers Dam Removal database",
          href="https://doi.org/10.6084/m9.figshare.5234068.v2",
          target="_blank"),br(),
 "•	",a("Dam Removal Information Portal",
        href="https://data.usgs.gov/drip-dashboard/",
        target="_blank"), br(),
-"•	",a("SARP aquatic Barrier Inventory",
-       href="https://connectivity.sarpdata.com/summary/",
+"•	",a("National Aquatic Connectivity Collaborative",
+       href="https://aquaticbarriers.org",
+       target="_blank"), br(),
+"•	",a("Estimating the Monetary Costs of Aging Dam Removals in the United States",
+       href="https://www.sciencedirect.com/science/article/pii/S2667010026000661",
        target="_blank")
+
 ))})
  output$interactivetools<-renderUI({
    HTML(paste0(
@@ -824,7 +836,10 @@ server <- function(input, output) {
      "•	Duda, J.J., Jumani, S., Wieferich, D.J., Tullos, D., McKay, S.K., Randle, T.J., Jansen, A., Bailey, S., Jenson, B.L., Johnson, R.C., Wagner, E., Richards, K., Wenger, S.J., Walther, E.J, and Bountry, J.A. (2023). Patterns, drivers, and a predictive model of dam removal cost in the United States. Frontiers in Ecology and the Environment. 11. doi:",a("10.3389/fevo.2023.1215471",
                                                                                                                                                                                                                                                                                                                                                                       href="https://doi.org/10.3389/fevo.2023.1215471",
                                                                                                                                                                                                                                                                                                                                                                       target="_blank"),".",br(),
-     "•	Bountry J., Duda J., Randle T., Jansen A., Jumani S., McKay K., Bailey S.  (2023). Dam Removal Cost Databases and Drivers. SEDHYD."))
+     "•	Bountry J., Duda J., Randle T., Jansen A., Jumani S., McKay K., Bailey S.  (2023). Dam Removal Cost Databases and Drivers. SEDHYD. ",a("https://ui.adsabs.harvard.edu/abs/2024usgs.rept....4B/abstract",
+                                                                                                                                              href="https://ui.adsabs.harvard.edu/abs/2024usgs.rept....4B/abstract",
+                                                                                                                                              target="_blank")
+     ))
  })
  
   output$logos<-renderImage({
